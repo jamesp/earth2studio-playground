@@ -1,0 +1,22 @@
+[project]
+name = "earth2studio-playground"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = "==3.12.*"
+dependencies = [
+    "cartopy>=0.25.0",
+    "earth2studio[atlas,data]",
+    "eccodeslib>=2.45.1.9",
+    "ipykernel>=7.2.0",
+    "matplotlib>=3.10.8",
+    "natten",
+    "numpy>=2.4.2",
+    "pygrib>=2.1.8",
+    "torch==2.10.0",
+]
+
+
+[tool.uv.sources]
+earth2studio = { git = "https://github.com/NVIDIA/earth2studio.git", rev = "0.12.1" }
+natten = { url = "https://github.com/SHI-Labs/NATTEN/releases/download/v0.21.5/natten-0.21.5%2Btorch2100cu128-cp312-cp312-linux_x86_64.whl"}
