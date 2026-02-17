@@ -89,11 +89,6 @@ Dataset key format: `<collection_type>::<asset_key>::<cf_variable>[::pressure_hP
 Handled by the framework's `fetch_data(interp_to=model.input_coords())`, not by custom code.
 Native ~0.09° → Atlas 0.25° (721×1440) via xarray interpolation.
 
-### 3. Legacy Monolith (`metoffice_data.py`)
-
-**`PlanetaryComputerMetOffice`** — original monolithic class (preserved for reference).
-Combines LOAD + TRANSFORM in a single class with custom regridding.
-
 ### Composed Pipeline
 
 ```python
