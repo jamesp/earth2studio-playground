@@ -1,8 +1,13 @@
 """Example: Run NVIDIA Atlas inference initialised with Met Office T+0 forecast.
 
-This script demonstrates how to use the PlanetaryComputerMetOffice data loader
-to fetch initial conditions from the Met Office global deterministic model and
-run the Atlas AI weather model for a 24-hour forecast.
+This script demonstrates the decomposed Met Office data pipeline:
+
+1. **PlanetaryComputerMetOfficeNative** — pure DataSource that loads raw
+   Met Office fields on the native ~0.09° grid with native variable names.
+2. **MetOfficeToAtlasDiagnostic** — DiagnosticModel (torch.nn.Module) that
+   derives Atlas input variables from native Met Office fields.
+3. **fetch_data** with ``interp_to`` — the framework handles regridding from
+   the native grid to the Atlas 0.25° grid.
 
 Requirements:
     - GPU with sufficient VRAM for Atlas (~16GB+)
@@ -18,7 +23,9 @@ from datetime import datetime
 
 from earth2studio.models.px.atlas import Atlas, VARIABLES as ATLAS_VARIABLES
 from earth2studio.data.utils import fetch_data
-from metoffice_data import PlanetaryComputerMetOffice
+
+from metoffice_native import PlanetaryComputerMetOfficeNative
+from metoffice_diagnostic import MetOfficeToAtlasDiagnostic
 
 
 def main():
@@ -36,44 +43,71 @@ def main():
     model.eval()
     print("Atlas model loaded successfully.")
 
-    # --- Step 2: Fetch Met Office initial conditions ---
-    print("\n=== Fetching Met Office initial conditions ===")
-    ds = PlanetaryComputerMetOffice(forecast_hour=0, verbose=True)
+    # --- Step 2: Set up the data pipeline ---
+    print("\n=== Setting up Met Office data pipeline ===")
 
-    # Atlas needs two input lead times: T-6h and T+0
-    # For T-6h we use the 6-hour forecast from the same run
-    ds_t_minus_6 = PlanetaryComputerMetOffice(forecast_hour=6, verbose=True)
+    # Pure data loaders — return native Met Office fields on native grid
+    native_ds_t0 = PlanetaryComputerMetOfficeNative(forecast_hour=0, verbose=True)
+    native_ds_t6 = PlanetaryComputerMetOfficeNative(forecast_hour=6, verbose=True)
 
-    # Fetch T+0 data
+    # Diagnostic model — derives Atlas variables from Met Office fields
+    diagnostic = MetOfficeToAtlasDiagnostic().to(device)
+
+    # The diagnostic declares what native variables it needs
+    native_variables = np.array(diagnostic.input_coords()["variable"])
+    print(f"Native variables needed: {len(native_variables)}")
+    print(f"Atlas output variables: {len(diagnostic.output_coords(diagnostic.input_coords())['variable'])}")
+
+    # --- Step 3: Fetch native Met Office data ---
+    # fetch_data handles regridding from native ~0.09° to Atlas 0.25° grid
+    # via the interp_to parameter
+    atlas_input_coords = model.input_coords()
+
+    # T+0 data
+    print(f"\nFetching T+0 state for {init_time}...")
     time_array = np.array([np.datetime64(init_time)])
-    variables = np.array(ATLAS_VARIABLES)
+    x_t0, coords_t0 = fetch_data(
+        source=native_ds_t0,
+        time=time_array,
+        variable=native_variables,
+        device=device,
+        interp_to=atlas_input_coords,  # regrid native → Atlas grid
+    )
+    print(f"  Regridded shape: {x_t0.shape}")
 
-    print(f"Fetching T+0 state for {init_time}...")
-    x_t0, coords_t0 = fetch_data(ds, time_array, variables, device=device)
-    print(f"  Shape: {x_t0.shape}")
-
-    # For T-6h, use the previous model run's T+0 or current run's T+6 from 6h earlier
-    # Here we approximate by using the 6h forecast from the 6h-earlier run
-    init_time_minus_6 = datetime(2026, 2, 16, 18)  # previous run
+    # T-6h data (from previous model run)
+    init_time_minus_6 = datetime(2026, 2, 16, 18)
     time_array_m6 = np.array([np.datetime64(init_time_minus_6)])
 
     print(f"Fetching T-6h state from {init_time_minus_6} +6h forecast...")
-    x_tm6, coords_tm6 = fetch_data(ds_t_minus_6, time_array_m6, variables, device=device)
-    print(f"  Shape: {x_tm6.shape}")
+    x_tm6, coords_tm6 = fetch_data(
+        source=native_ds_t6,
+        time=time_array_m6,
+        variable=native_variables,
+        device=device,
+        interp_to=atlas_input_coords,
+    )
+    print(f"  Regridded shape: {x_tm6.shape}")
 
-    # --- Step 3: Build Atlas input ---
+    # --- Step 4: Apply Met Office → Atlas variable derivation ---
+    print("\n=== Applying Met Office → Atlas diagnostic ===")
+    x_t0_atlas, coords_t0_atlas = diagnostic(x_t0, coords_t0)
+    x_tm6_atlas, coords_tm6_atlas = diagnostic(x_tm6, coords_tm6)
+    print(f"  Atlas variables shape: {x_t0_atlas.shape}")
+    print(f"  Variables: {list(coords_t0_atlas['variable'][:8])}...")
+
+    # --- Step 5: Build Atlas input ---
     # Atlas expects shape: (batch, time, lead_time=2, variable, lat, lon)
     # lead_time[0] = T-6h, lead_time[1] = T+0
     print("\n=== Building Atlas input ===")
-    x_input = torch.cat([x_tm6, x_t0], dim=1)  # stack along lead_time dim
+    x_input = torch.cat([x_tm6_atlas, x_t0_atlas], dim=1)
     print(f"Input tensor shape: {x_input.shape}")
 
-    # Build input coords
     input_coords = model.input_coords()
     input_coords["batch"] = np.array([0])
     input_coords["time"] = time_array
 
-    # --- Step 4: Run autoregressive forecast ---
+    # --- Step 6: Run autoregressive forecast ---
     print(f"\n=== Running {forecast_steps}-step Atlas forecast ===")
     results = []
     for step, (pred, pred_coords) in enumerate(model.create_iterator(x_input, input_coords)):
@@ -83,11 +117,10 @@ def main():
         if step >= forecast_steps:
             break
 
-    # --- Step 5: Print summary ---
+    # --- Step 7: Print summary ---
     print("\n=== Forecast complete ===")
     for pred, coords in results:
         lead_h = int(coords["lead_time"][0] / np.timedelta64(1, "h"))
-        # Find t2m index
         var_list = list(coords["variable"])
         t2m_idx = var_list.index("t2m")
         t2m = pred[0, 0, 0, t2m_idx].numpy()
