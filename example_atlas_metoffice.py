@@ -4,12 +4,11 @@ This script demonstrates the decomposed Met Office data pipeline:
 
 1. **PlanetaryComputerMetOfficeNative** — pure DataSource that loads raw
    Met Office fields on the native ~0.09° grid with native variable names.
-2. **MetOfficeToAtlasDiagnostic** — DiagnosticModel (torch.nn.Module) that
-   derives Atlas input variables from native Met Office fields.
-3. **NOAA OISST** — real sea surface temperature from Planetary Computer,
-   spliced into the Atlas input in place of the old air-temperature proxy.
+2. **NOAA OISST** — real sea surface temperature from Planetary Computer.
+3. **MetOfficeToAtlasDiagnostic** — DiagnosticModel (torch.nn.Module) that
+   derives Atlas input variables from native Met Office fields + SST.
 4. **fetch_data** with ``interp_to`` — the framework handles regridding from
-   the native grid to the Atlas 0.25° grid.
+   native grids to the Atlas 0.25° grid.
 
 Requirements:
     - GPU with sufficient VRAM for Atlas (~16GB+)
@@ -27,7 +26,11 @@ import torch
 from earth2studio.data.utils import fetch_data
 from earth2studio.models.px.atlas import Atlas
 
-from metoffice_diagnostic import MetOfficeToAtlasDiagnostic, fetch_oisst, splice_sst
+from metoffice_diagnostic import (
+    MetOfficeToAtlasDiagnostic,
+    combine_inputs,
+    fetch_oisst,
+)
 from metoffice_native import PlanetaryComputerMetOfficeNative
 
 
@@ -48,24 +51,25 @@ def main():
     native_ds_t0 = PlanetaryComputerMetOfficeNative(forecast_hour=0, verbose=True)
     native_ds_t6 = PlanetaryComputerMetOfficeNative(forecast_hour=6, verbose=True)
     diagnostic = MetOfficeToAtlasDiagnostic().to(device)
-    native_variables = np.array(diagnostic.input_coords()["variable"])
-    print(f"Native variables needed: {len(native_variables)}")
-    print(f"Atlas output variables: {len(diagnostic.output_coords(diagnostic.input_coords())['variable'])}")
+    metoffice_variables = diagnostic.metoffice_variables
+    print(f"Met Office variables: {len(metoffice_variables)}")
+    print(f"Atlas output variables: {len(diagnostic.out_variables)}")
 
     atlas_input_coords = model.input_coords()
 
+    # ---- T+0 state ----
     print(f"\nFetching T+0 state for {init_time}...")
     time_array = np.array([np.datetime64(init_time)])
     x_t0, coords_t0 = fetch_data(
         source=native_ds_t0,
         time=time_array,
-        variable=native_variables,
+        variable=metoffice_variables,
         device=device,
         interp_to=atlas_input_coords,
     )
-    print(f"  Regridded shape: {x_t0.shape}")
+    print(f"  Met Office shape: {x_t0.shape}")
 
-    # T-6h state from previous model run
+    # ---- T-6h state from previous model run ----
     init_time_minus_6 = datetime(2026, 2, 16, 18)
     time_array_m6 = np.array([np.datetime64(init_time_minus_6)])
 
@@ -73,30 +77,35 @@ def main():
     x_tm6, coords_tm6 = fetch_data(
         source=native_ds_t6,
         time=time_array_m6,
-        variable=native_variables,
+        variable=metoffice_variables,
         device=device,
         interp_to=atlas_input_coords,
     )
-    print(f"  Regridded shape: {x_tm6.shape}")
+    print(f"  Met Office shape: {x_tm6.shape}")
 
-    print("\n=== Applying Met Office → Atlas diagnostic ===")
-    x_t0_atlas, coords_t0_atlas = diagnostic(x_t0, coords_t0)
-    x_tm6_atlas, coords_tm6_atlas = diagnostic(x_tm6, coords_tm6)
-    print(f"  Diagnostic output shape: {x_t0_atlas.shape}")
-
+    # ---- Fetch SST from OISST ----
     print("\n=== Fetching NOAA OISST sea surface temperature ===")
-    sst_t0 = fetch_oisst(
+    sst_t0, sst_coords_t0 = fetch_oisst(
         time_array, atlas_input_coords=atlas_input_coords, device=device
     )
-    sst_tm6 = fetch_oisst(
+    sst_tm6, sst_coords_tm6 = fetch_oisst(
         time_array_m6, atlas_input_coords=atlas_input_coords, device=device
     )
     print(f"  SST shape: {sst_t0.shape}")
 
-    print("\n=== Splicing SST into Atlas inputs ===")
-    x_t0_atlas, coords_t0_atlas = splice_sst(x_t0_atlas, coords_t0_atlas, sst_t0)
-    x_tm6_atlas, coords_tm6_atlas = splice_sst(x_tm6_atlas, coords_tm6_atlas, sst_tm6)
-    print(f"  Full Atlas variables shape: {x_t0_atlas.shape}")
+    # ---- Combine Met Office + SST, then run diagnostic ----
+    print("\n=== Combining inputs and running diagnostic ===")
+    x_t0_combined, coords_t0_combined = combine_inputs(
+        x_t0, coords_t0, sst_t0, sst_coords_t0
+    )
+    x_tm6_combined, coords_tm6_combined = combine_inputs(
+        x_tm6, coords_tm6, sst_tm6, sst_coords_tm6
+    )
+    print(f"  Combined input shape: {x_t0_combined.shape}")
+
+    x_t0_atlas, coords_t0_atlas = diagnostic(x_t0_combined, coords_t0_combined)
+    x_tm6_atlas, coords_tm6_atlas = diagnostic(x_tm6_combined, coords_tm6_combined)
+    print(f"  Atlas variables shape: {x_t0_atlas.shape}")
     print(f"  Variables: {list(coords_t0_atlas['variable'][:8])}...")
 
     # Atlas expects lead_time dim: [T-6h, T+0]

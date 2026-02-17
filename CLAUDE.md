@@ -81,7 +81,7 @@ Dataset key format: `<collection_type>::<asset_key>::<cf_variable>[::pressure_hP
 
 **`MetOfficeToAtlasDiagnostic`** — `torch.nn.Module` implementing `DiagnosticModel` protocol.
 
-- 70 input variables (native Met Office) → 74 output variables (Atlas minus SST)
+- 71 input variables (70 native Met Office + 1 SST from OISST) → 75 output variables (Atlas)
 - All derivations on torch tensors, GPU-compatible
 - Stateless, uses `@torch.inference_mode()`
 
@@ -94,7 +94,7 @@ Dataset key format: `<collection_type>::<asset_key>::<cf_variable>[::pressure_hP
 - **Surface pressure**: approximated by MSLP
 - **TCWV**: filled with zeros (not available)
 
-Does **not** produce SST — it must come from OISST (see below).
+SST is a passthrough input from OISST (not derived from Met Office data).
 
 #### Regridding
 
@@ -104,22 +104,22 @@ Native ~0.09° → Atlas 0.25° (721×1440) via xarray interpolation.
 ### SST from OISST
 
 SST is fetched from `PlanetaryComputerOISST` (NOAA daily 0.25° blended analysis)
-and spliced into the Atlas tensor via `splice_sst()`.  This replaces the old
+and combined with Met Office data before the diagnostic.  This replaces the old
 approach of using Met Office `surface_temperature` (skin/air temp, not true SST).
 
 OISST has ~1–2 day latency; SST changes slowly enough that this is acceptable.
-Helper functions `fetch_oisst()` and `splice_sst()` live in `metoffice_diagnostic.py`.
+Helper functions `fetch_oisst()` and `combine_inputs()` live in `metoffice_diagnostic.py`.
 
 ### Composed Pipeline
 
 ```python
 # 1. Fetch native Met Office data (framework regrids to Atlas grid)
-x, coords = fetch_data(native_ds, time, diagnostic.input_coords()["variable"],
+x, coords = fetch_data(native_ds, time, diagnostic.metoffice_variables,
                        device=device, interp_to=atlas.input_coords())
-# 2. Derive Atlas variables (produces everything except SST)
-x_atlas, coords_atlas = diagnostic(x, coords)
-# 3. Fetch real SST from OISST and splice in
-sst = fetch_oisst(time, atlas_input_coords=atlas.input_coords(), device=device)
-x_atlas, coords_atlas = splice_sst(x_atlas, coords_atlas, sst)
+# 2. Fetch real SST from OISST
+sst, sst_coords = fetch_oisst(time, atlas_input_coords=atlas.input_coords(), device=device)
+# 3. Combine all inputs and derive Atlas variables
+x_combined, coords_combined = combine_inputs(x, coords, sst, sst_coords)
+x_atlas, coords_atlas = diagnostic(x_combined, coords_combined)
 # 4. Feed into Atlas model
 ```

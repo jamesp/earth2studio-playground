@@ -12,17 +12,21 @@ components, specific humidity, geopotential, etc.).
 The diagnostic operates on torch tensors with coordinate system:
 ``(batch, variable, lat, lon)``.
 
-SST is **not** produced by this diagnostic — it must be fetched from an
-external source (e.g. OISST) and spliced into the Atlas input tensor.
-See :func:`splice_sst` for a convenience helper.
+The diagnostic expects SST as an input (from OISST or another source)
+alongside the native Met Office fields.  Use :func:`fetch_oisst` to
+retrieve SST and :func:`combine_inputs` to merge it with Met Office data
+before calling the diagnostic.
 
 Usage::
 
-    from metoffice_diagnostic import MetOfficeToAtlasDiagnostic, splice_sst
+    from metoffice_diagnostic import MetOfficeToAtlasDiagnostic, fetch_oisst, combine_inputs
 
     diag = MetOfficeToAtlasDiagnostic()
-    x_atlas, coords_atlas = diag(x_metoffice, coords_metoffice)
-    x_atlas, coords_atlas = splice_sst(x_atlas, coords_atlas, sst_tensor)
+    # metoffice_variables = diag.metoffice_variables  (70 native Met Office vars)
+    # fetch Met Office and OISST separately, then combine:
+    x_combined, coords_combined = combine_inputs(x_metoffice, coords_metoffice,
+                                                  sst_data, sst_coords)
+    x_atlas, coords_atlas = diag(x_combined, coords_combined)
 """
 
 from __future__ import annotations
@@ -50,7 +54,7 @@ ATLAS_PRESSURE_LEVELS_HPA: list[int] = [
 ]
 
 
-def _build_input_variables() -> list[str]:
+def _build_metoffice_variables() -> list[str]:
     """Native Met Office variables needed by this diagnostic."""
     variables: list[str] = [
         "wind_speed_at_10m",
@@ -70,28 +74,22 @@ def _build_input_variables() -> list[str]:
     return variables
 
 
-#: Variables produced by :class:`MetOfficeToAtlasDiagnostic`.
-#: SST is intentionally excluded — it must come from an external source
-#: (e.g. OISST) and be spliced in with :func:`splice_sst`.
-ATLAS_DIAGNOSTIC_VARIABLES: list[str] = (
-    ["u10m", "v10m", "u100m", "v100m", "t2m", "sp", "msl", "tcwv"]
-    + [f"{p}{hpa}" for p in ("u", "v", "z", "t", "q") for hpa in ATLAS_PRESSURE_LEVELS_HPA]
-    + ["tp"]
-)
+#: Native Met Office variables (70 fields).
+METOFFICE_VARIABLES: list[str] = _build_metoffice_variables()
 
-#: Full set of Atlas input variables including SST.
-ATLAS_ALL_VARIABLES: list[str] = (
+#: Full diagnostic input: Met Office fields + SST from OISST.
+INPUT_VARIABLES: list[str] = METOFFICE_VARIABLES + ["sst"]
+
+#: Atlas output variables (75 fields).
+OUTPUT_VARIABLES: list[str] = (
     ["u10m", "v10m", "u100m", "v100m", "t2m", "sp", "msl", "tcwv"]
     + [f"{p}{hpa}" for p in ("u", "v", "z", "t", "q") for hpa in ATLAS_PRESSURE_LEVELS_HPA]
     + ["sst", "tp"]
 )
 
 
-INPUT_VARIABLES: list[str] = _build_input_variables()
-
-
 class MetOfficeToAtlasDiagnostic(torch.nn.Module):
-    """Diagnostic model converting native Met Office fields to Atlas inputs.
+    """Diagnostic model converting native Met Office fields + SST to Atlas inputs.
 
     Derivations performed:
 
@@ -104,9 +102,7 @@ class MetOfficeToAtlasDiagnostic(torch.nn.Module):
     - **100 m wind**: falls back to 10 m (not available from Met Office).
     - **Surface pressure**: approximated by MSLP.
     - **TCWV**: filled with zeros (not available from Met Office).
-
-    SST is **not** produced — it must be spliced in separately
-    (see :func:`splice_sst`).
+    - **SST**: passed through from input (supplied by OISST or similar).
 
     The module is stateless and operates in inference mode.
     """
@@ -115,13 +111,15 @@ class MetOfficeToAtlasDiagnostic(torch.nn.Module):
         super().__init__()
 
         self.in_variables = np.array(INPUT_VARIABLES)
-        self.out_variables = np.array(ATLAS_DIAGNOSTIC_VARIABLES)
+        self.out_variables = np.array(OUTPUT_VARIABLES)
+        #: The 70 Met Office variable names (for fetching from the native source).
+        self.metoffice_variables = np.array(METOFFICE_VARIABLES)
 
         self._in_idx: dict[str, int] = {
             v: i for i, v in enumerate(INPUT_VARIABLES)
         }
         self._out_idx: dict[str, int] = {
-            v: i for i, v in enumerate(ATLAS_DIAGNOSTIC_VARIABLES)
+            v: i for i, v in enumerate(OUTPUT_VARIABLES)
         }
 
         p_pa = torch.tensor(
@@ -197,7 +195,7 @@ class MetOfficeToAtlasDiagnostic(torch.nn.Module):
         x: torch.Tensor,
         coords: CoordSystem,
     ) -> tuple[torch.Tensor, CoordSystem]:
-        """Transform native Met Office fields to Atlas inputs.
+        """Transform native Met Office fields + SST to Atlas inputs.
 
         Parameters
         ----------
@@ -264,54 +262,46 @@ class MetOfficeToAtlasDiagnostic(torch.nn.Module):
             q = self._specific_humidity(rh, t_k, p_pa)
             out[:, self._out_idx[f"q{hpa}"]] = q
 
+        out[:, self._out_idx["sst"]] = self._in(x, "sst")
         out[:, self._out_idx["tp"]] = self._in(x, "lwe_precipitation_rate")
 
         return out, output_coords
 
 
-# ---- SST splicing helpers ----
-
-_SST_IDX = ATLAS_ALL_VARIABLES.index("sst")
-_TP_IDX = ATLAS_ALL_VARIABLES.index("tp")
+# ---- Data loading helpers ----
 
 
-def splice_sst(
-    x: torch.Tensor,
-    coords: CoordSystem,
-    sst: torch.Tensor,
+def combine_inputs(
+    metoffice_data: torch.Tensor,
+    metoffice_coords: CoordSystem,
+    sst_data: torch.Tensor,
+    sst_coords: CoordSystem,
 ) -> tuple[torch.Tensor, CoordSystem]:
-    """Insert an SST field into diagnostic output to produce the full Atlas variable set.
+    """Combine Met Office fields and OISST into a single input tensor.
 
-    The diagnostic produces all Atlas variables except SST.  This function
-    inserts the SST slice at the correct position so the resulting tensor
-    matches :data:`ATLAS_ALL_VARIABLES`.
+    Concatenates along the variable dimension and builds a coordinate
+    system matching :data:`INPUT_VARIABLES`.
 
     Parameters
     ----------
-    x : torch.Tensor
-        Diagnostic output, shape ``(batch, n_diag_vars, lat, lon)``.
-    coords : CoordSystem
-        Coordinate dict from the diagnostic (variable dim = ATLAS_DIAGNOSTIC_VARIABLES).
-    sst : torch.Tensor
-        SST field, shape ``(batch, 1, lat, lon)`` in Kelvin.
+    metoffice_data : torch.Tensor
+        Met Office fields, shape ``(batch, 70, lat, lon)``.
+    metoffice_coords : CoordSystem
+        Coordinates from the Met Office fetch.
+    sst_data : torch.Tensor
+        SST field from OISST, shape ``(batch, 1, lat, lon)``.
+    sst_coords : CoordSystem
+        Coordinates from the OISST fetch.
 
     Returns
     -------
     tuple[torch.Tensor, CoordSystem]
-        Tensor with SST inserted and updated coordinate system matching
-        :data:`ATLAS_ALL_VARIABLES`.
+        Combined tensor ``(batch, 71, lat, lon)`` and coordinate system.
     """
-    # Diagnostic output has tp as last variable; SST goes just before it.
-    # ATLAS_ALL_VARIABLES order: [..., sst, tp]
-    # ATLAS_DIAGNOSTIC_VARIABLES order: [..., tp]
-    tp = x[:, -1:, :, :]  # last slice is tp
-    rest = x[:, :-1, :, :]  # everything before tp
-
-    out = torch.cat([rest, sst, tp], dim=1)
-
-    new_coords = coords.copy()
-    new_coords["variable"] = np.array(ATLAS_ALL_VARIABLES)
-    return out, new_coords
+    combined = torch.cat([metoffice_data, sst_data], dim=1)
+    coords = metoffice_coords.copy()
+    coords["variable"] = np.array(INPUT_VARIABLES)
+    return combined, coords
 
 
 def fetch_oisst(
@@ -319,7 +309,7 @@ def fetch_oisst(
     *,
     atlas_input_coords: CoordSystem,
     device: torch.device | str = "cpu",
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, CoordSystem]:
     """Fetch SST from NOAA OISST on Planetary Computer, regridded to the Atlas grid.
 
     Parameters
@@ -333,18 +323,17 @@ def fetch_oisst(
 
     Returns
     -------
-    torch.Tensor
-        SST field of shape ``(batch, 1, lat, lon)`` in Kelvin.
+    tuple[torch.Tensor, CoordSystem]
+        SST field ``(batch, 1, lat, lon)`` in Kelvin, and its coordinates.
     """
     from earth2studio.data import PlanetaryComputerOISST
     from earth2studio.data.utils import fetch_data
 
     oisst = PlanetaryComputerOISST()
-    sst_data, _ = fetch_data(
+    return fetch_data(
         source=oisst,
         time=time,
         variable=np.array(["sst"]),
         device=device,
         interp_to=atlas_input_coords,
     )
-    return sst_data
