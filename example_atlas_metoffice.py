@@ -6,12 +6,14 @@ This script demonstrates the decomposed Met Office data pipeline:
    Met Office fields on the native ~0.09° grid with native variable names.
 2. **MetOfficeToAtlasDiagnostic** — DiagnosticModel (torch.nn.Module) that
    derives Atlas input variables from native Met Office fields.
-3. **fetch_data** with ``interp_to`` — the framework handles regridding from
+3. **NOAA OISST** — real sea surface temperature from Planetary Computer,
+   spliced into the Atlas input in place of the old air-temperature proxy.
+4. **fetch_data** with ``interp_to`` — the framework handles regridding from
    the native grid to the Atlas 0.25° grid.
 
 Requirements:
     - GPU with sufficient VRAM for Atlas (~16GB+)
-    - Internet access for Met Office data and Atlas model download
+    - Internet access for Met Office data, OISST, and Atlas model download
 
 Usage:
     uv run python example_atlas_metoffice.py
@@ -25,7 +27,7 @@ import torch
 from earth2studio.data.utils import fetch_data
 from earth2studio.models.px.atlas import Atlas
 
-from metoffice_diagnostic import MetOfficeToAtlasDiagnostic
+from metoffice_diagnostic import MetOfficeToAtlasDiagnostic, fetch_oisst, splice_sst
 from metoffice_native import PlanetaryComputerMetOfficeNative
 
 
@@ -80,7 +82,21 @@ def main():
     print("\n=== Applying Met Office → Atlas diagnostic ===")
     x_t0_atlas, coords_t0_atlas = diagnostic(x_t0, coords_t0)
     x_tm6_atlas, coords_tm6_atlas = diagnostic(x_tm6, coords_tm6)
-    print(f"  Atlas variables shape: {x_t0_atlas.shape}")
+    print(f"  Diagnostic output shape: {x_t0_atlas.shape}")
+
+    print("\n=== Fetching NOAA OISST sea surface temperature ===")
+    sst_t0 = fetch_oisst(
+        time_array, atlas_input_coords=atlas_input_coords, device=device
+    )
+    sst_tm6 = fetch_oisst(
+        time_array_m6, atlas_input_coords=atlas_input_coords, device=device
+    )
+    print(f"  SST shape: {sst_t0.shape}")
+
+    print("\n=== Splicing SST into Atlas inputs ===")
+    x_t0_atlas, coords_t0_atlas = splice_sst(x_t0_atlas, coords_t0_atlas, sst_t0)
+    x_tm6_atlas, coords_tm6_atlas = splice_sst(x_tm6_atlas, coords_tm6_atlas, sst_tm6)
+    print(f"  Full Atlas variables shape: {x_t0_atlas.shape}")
     print(f"  Variables: {list(coords_t0_atlas['variable'][:8])}...")
 
     # Atlas expects lead_time dim: [T-6h, T+0]

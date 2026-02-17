@@ -81,7 +81,7 @@ Dataset key format: `<collection_type>::<asset_key>::<cf_variable>[::pressure_hP
 
 **`MetOfficeToAtlasDiagnostic`** — `torch.nn.Module` implementing `DiagnosticModel` protocol.
 
-- 71 input variables (native Met Office) → 75 output variables (Atlas)
+- 70 input variables (native Met Office) → 74 output variables (Atlas minus SST)
 - All derivations on torch tensors, GPU-compatible
 - Stateless, uses `@torch.inference_mode()`
 
@@ -94,10 +94,21 @@ Dataset key format: `<collection_type>::<asset_key>::<cf_variable>[::pressure_hP
 - **Surface pressure**: approximated by MSLP
 - **TCWV**: filled with zeros (not available)
 
+Does **not** produce SST — it must come from OISST (see below).
+
 #### Regridding
 
 Handled by the framework's `fetch_data(interp_to=model.input_coords())`, not by custom code.
 Native ~0.09° → Atlas 0.25° (721×1440) via xarray interpolation.
+
+### SST from OISST
+
+SST is fetched from `PlanetaryComputerOISST` (NOAA daily 0.25° blended analysis)
+and spliced into the Atlas tensor via `splice_sst()`.  This replaces the old
+approach of using Met Office `surface_temperature` (skin/air temp, not true SST).
+
+OISST has ~1–2 day latency; SST changes slowly enough that this is acceptable.
+Helper functions `fetch_oisst()` and `splice_sst()` live in `metoffice_diagnostic.py`.
 
 ### Composed Pipeline
 
@@ -105,7 +116,10 @@ Native ~0.09° → Atlas 0.25° (721×1440) via xarray interpolation.
 # 1. Fetch native Met Office data (framework regrids to Atlas grid)
 x, coords = fetch_data(native_ds, time, diagnostic.input_coords()["variable"],
                        device=device, interp_to=atlas.input_coords())
-# 2. Derive Atlas variables
+# 2. Derive Atlas variables (produces everything except SST)
 x_atlas, coords_atlas = diagnostic(x, coords)
-# 3. Feed into Atlas model
+# 3. Fetch real SST from OISST and splice in
+sst = fetch_oisst(time, atlas_input_coords=atlas.input_coords(), device=device)
+x_atlas, coords_atlas = splice_sst(x_atlas, coords_atlas, sst)
+# 4. Feed into Atlas model
 ```
