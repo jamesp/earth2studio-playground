@@ -12,18 +12,21 @@ components, specific humidity, geopotential, etc.).
 The diagnostic operates on torch tensors with coordinate system:
 ``(batch, variable, lat, lon)``.
 
-The diagnostic expects SST as an input (from OISST or another source)
-alongside the native Met Office fields.  Use :func:`fetch_oisst` to
-retrieve SST and :func:`combine_inputs` to merge it with Met Office data
-before calling the diagnostic.
+The diagnostic expects SST as an input alongside the native Met Office
+fields.  Use :func:`fetch_metoffice_sst` (from :mod:`metoffice_ocean_sst`)
+to retrieve SST and :func:`combine_inputs` to merge it with Met Office data
+before calling the diagnostic.  The older :func:`fetch_oisst` is still
+available but NOAA OISST on Planetary Computer is no longer kept up to date.
 
 Usage::
 
-    from metoffice_diagnostic import MetOfficeToAtlasDiagnostic, fetch_oisst, combine_inputs
+    from metoffice_diagnostic import MetOfficeToAtlasDiagnostic, combine_inputs
+    from metoffice_ocean_sst import fetch_metoffice_sst
 
     diag = MetOfficeToAtlasDiagnostic()
     # metoffice_variables = diag.metoffice_variables  (70 native Met Office vars)
-    # fetch Met Office and OISST separately, then combine:
+    # fetch Met Office and SST separately, then combine:
+    sst_data, sst_coords = fetch_metoffice_sst(time, atlas_input_coords=model.input_coords())
     x_combined, coords_combined = combine_inputs(x_metoffice, coords_metoffice,
                                                   sst_data, sst_coords)
     x_atlas, coords_atlas = diag(x_combined, coords_combined)

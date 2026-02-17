@@ -4,7 +4,7 @@ This script demonstrates the decomposed Met Office data pipeline:
 
 1. **PlanetaryComputerMetOfficeNative** — pure DataSource that loads raw
    Met Office fields on the native ~0.09° grid with native variable names.
-2. **NOAA OISST** — real sea surface temperature from Planetary Computer.
+2. **Met Office Global Ocean** — SST from the coupled ocean model (AWS ASDI).
 3. **MetOfficeToAtlasDiagnostic** — DiagnosticModel (torch.nn.Module) that
    derives Atlas input variables from native Met Office fields + SST.
 4. **fetch_data** with ``interp_to`` — the framework handles regridding from
@@ -36,8 +36,8 @@ from coords import interp_coords_to_latlon, make_interp_to
 from metoffice_diagnostic import (
     MetOfficeToAtlasDiagnostic,
     combine_inputs,
-    fetch_oisst,
 )
+from metoffice_ocean_sst import fetch_metoffice_sst
 from metoffice_native import PlanetaryComputerMetOfficeNative
 
 
@@ -179,12 +179,12 @@ def main():
     )
     print(f"  Met Office regridded shape: {x_tm6.shape}")
 
-    # ---- Fetch SST from OISST ----
-    print("\n=== Fetching NOAA OISST sea surface temperature ===")
-    sst_t0, sst_coords_t0 = fetch_oisst(
+    # ---- Fetch SST from Met Office Global Ocean ----
+    print("\n=== Fetching Met Office ocean SST ===")
+    sst_t0, sst_coords_t0 = fetch_metoffice_sst(
         time_array, atlas_input_coords=atlas_input_coords, device=device
     )
-    sst_tm6, sst_coords_tm6 = fetch_oisst(
+    sst_tm6, sst_coords_tm6 = fetch_metoffice_sst(
         time_array_m6, atlas_input_coords=atlas_input_coords, device=device
     )
     print(f"  SST shape: {sst_t0.shape}")
