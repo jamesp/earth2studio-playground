@@ -10,6 +10,9 @@ This script demonstrates the decomposed Met Office data pipeline:
 4. **fetch_data** with ``interp_to`` — the framework handles regridding from
    native grids to the Atlas 0.25° grid.
 
+Atlas expects input shape ``(batch, time, lead_time=2, variable=75, lat=721, lon=1440)``
+with lead_time ``[-6h, 0h]``.
+
 Requirements:
     - GPU with sufficient VRAM for Atlas (~16GB+)
     - Internet access for Met Office data, OISST, and Atlas model download
@@ -18,6 +21,7 @@ Usage:
     uv run python example_atlas_metoffice.py
 """
 
+from collections import OrderedDict
 from datetime import datetime
 
 import numpy as np
@@ -26,12 +30,42 @@ import torch
 from earth2studio.data.utils import fetch_data
 from earth2studio.models.px.atlas import Atlas
 
+from coords import interp_coords_to_latlon, make_interp_to
 from metoffice_diagnostic import (
     MetOfficeToAtlasDiagnostic,
     combine_inputs,
     fetch_oisst,
 )
 from metoffice_native import PlanetaryComputerMetOfficeNative
+
+
+def fetch_metoffice_regridded(
+    native_ds: PlanetaryComputerMetOfficeNative,
+    time_array: np.ndarray,
+    variables: np.ndarray,
+    *,
+    atlas_input_coords: OrderedDict,
+    device: torch.device,
+) -> tuple[torch.Tensor, OrderedDict]:
+    """Fetch Met Office data and regrid to the Atlas 0.25° grid.
+
+    Handles the ``_lat``/``_lon`` → ``lat``/``lon`` key translation that
+    ``fetch_data`` with ``interp_to`` requires.
+
+    Returns
+    -------
+    tuple[torch.Tensor, CoordSystem]
+        Tensor of shape ``(time, lead_time=1, variable, lat, lon)`` and
+        coordinates with ``lat``/``lon`` keys.
+    """
+    data, coords = fetch_data(
+        source=native_ds,
+        time=time_array,
+        variable=variables,
+        device=device,
+        interp_to=make_interp_to(atlas_input_coords),
+    )
+    return data, interp_coords_to_latlon(coords)
 
 
 def main():
@@ -58,30 +92,24 @@ def main():
     atlas_input_coords = model.input_coords()
 
     # ---- T+0 state ----
-    print(f"\nFetching T+0 state for {init_time}...")
     time_array = np.array([np.datetime64(init_time)])
-    x_t0, coords_t0 = fetch_data(
-        source=native_ds_t0,
-        time=time_array,
-        variable=metoffice_variables,
-        device=device,
-        interp_to=atlas_input_coords,
+    print(f"\nFetching T+0 state for {init_time}...")
+    x_t0, coords_t0 = fetch_metoffice_regridded(
+        native_ds_t0, time_array, metoffice_variables,
+        atlas_input_coords=atlas_input_coords, device=device,
     )
-    print(f"  Met Office shape: {x_t0.shape}")
+    print(f"  Met Office regridded shape: {x_t0.shape}")
+    print(f"  Coord keys: {list(coords_t0.keys())}")
 
     # ---- T-6h state from previous model run ----
     init_time_minus_6 = datetime(2026, 2, 16, 18)
     time_array_m6 = np.array([np.datetime64(init_time_minus_6)])
-
     print(f"Fetching T-6h state from {init_time_minus_6} +6h forecast...")
-    x_tm6, coords_tm6 = fetch_data(
-        source=native_ds_t6,
-        time=time_array_m6,
-        variable=metoffice_variables,
-        device=device,
-        interp_to=atlas_input_coords,
+    x_tm6, coords_tm6 = fetch_metoffice_regridded(
+        native_ds_t6, time_array_m6, metoffice_variables,
+        atlas_input_coords=atlas_input_coords, device=device,
     )
-    print(f"  Met Office shape: {x_tm6.shape}")
+    print(f"  Met Office regridded shape: {x_tm6.shape}")
 
     # ---- Fetch SST from OISST ----
     print("\n=== Fetching NOAA OISST sea surface temperature ===")
@@ -105,21 +133,49 @@ def main():
 
     x_t0_atlas, coords_t0_atlas = diagnostic(x_t0_combined, coords_t0_combined)
     x_tm6_atlas, coords_tm6_atlas = diagnostic(x_tm6_combined, coords_tm6_combined)
-    print(f"  Atlas variables shape: {x_t0_atlas.shape}")
+    print(f"  Atlas variables shape (per timestep): {x_t0_atlas.shape}")
     print(f"  Variables: {list(coords_t0_atlas['variable'][:8])}...")
 
-    # Atlas expects lead_time dim: [T-6h, T+0]
+    # ---- Build Atlas input: (batch, time, lead_time=2, variable, lat, lon) ----
+    #
+    # Atlas expects lead_time dim with [-6h, 0h] (sliding window of two snapshots).
+    #
+    # After diagnostic, each timestep tensor has shape:
+    #   (time=1, lead_time=1, variable=75, lat=721, lon=1440)
+    # with coords {time, lead_time, variable, lat, lon}.
+    #
+    # We concatenate along the lead_time dim (dim 1) to combine the two
+    # snapshots, then prepend a batch dim.
     print("\n=== Building Atlas input ===")
-    x_input = torch.cat([x_tm6_atlas, x_t0_atlas], dim=1)
-    print(f"Input tensor shape: {x_input.shape}")
+
+    lead_time_dim = list(coords_t0_atlas.keys()).index("lead_time")
+    # Concatenate t-6h and t+0 along lead_time: (time=1, lead_time=2, 75, 721, 1440)
+    x_input = torch.cat([x_tm6_atlas, x_t0_atlas], dim=lead_time_dim)
+    # Add batch dim: (batch=1, time=1, lead_time=2, 75, 721, 1440)
+    x_input = x_input.unsqueeze(0)
+    print(f"  Input tensor shape: {x_input.shape}")
+    print(f"  Expected:           (1, 1, 2, 75, 721, 1440)")
 
     input_coords = model.input_coords()
     input_coords["batch"] = np.array([0])
     input_coords["time"] = time_array
 
+    # Verify shapes match Atlas expectations:
+    # (batch, time, lead_time, variable, lat, lon) = (1, 1, 2, 75, 721, 1440)
+    assert x_input.dim() == 6, f"Expected 6D tensor, got {x_input.dim()}D"
+    assert x_input.shape[2] == 2, (
+        f"lead_time dim should be 2, got {x_input.shape[2]}"
+    )
+    assert x_input.shape[3] == len(input_coords["variable"]), (
+        f"variable mismatch: tensor has {x_input.shape[3]}, "
+        f"coords has {len(input_coords['variable'])}"
+    )
+
     print(f"\n=== Running {forecast_steps}-step Atlas forecast ===")
     results = []
-    for step, (pred, pred_coords) in enumerate(model.create_iterator(x_input, input_coords)):
+    for step, (pred, pred_coords) in enumerate(
+        model.create_iterator(x_input, input_coords)
+    ):
         lead_h = int(pred_coords["lead_time"][0] / np.timedelta64(1, "h"))
         print(f"  Step {step}: T+{lead_h}h")
         results.append((pred.cpu(), pred_coords.copy()))

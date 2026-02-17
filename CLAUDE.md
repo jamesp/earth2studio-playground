@@ -33,6 +33,19 @@ Pipeline: `__call__` → `fetch` → `_fetch_data` → `_locate_item` + `_prepar
 
 Key dataclasses: `AssetPlan` (download plan), `VariableSpec` (resolved variable request)
 
+### Spatial coordinate key conventions (`lat`/`lon` vs `_lat`/`_lon`)
+
+earth2studio uses two naming conventions for spatial coordinates in `CoordSystem` dicts:
+
+- **`lat` / `lon`** — used by models (Atlas, Pangu, etc.) in `input_coords()` / `output_coords()`, and by data sources when **no** `interp_to` is used.
+- **`_lat` / `_lon`** — required by `fetch_data`'s `interp_to` argument, and produced in the output coords when `interp_to` is used. Also used for curvilinear grids (GOES, JPSS, CMIP6 ocean).
+
+This is **not documented** — it's only visible in `data/utils.py:prep_data_array` and one usage in `stormcast.py`.
+
+Helpers in `coords.py`:
+- `make_interp_to(model_coords)` — extracts `lat`/`lon` → `{"_lat": ..., "_lon": ...}`
+- `interp_coords_to_latlon(coords)` — renames `_lat`/`_lon` back to `lat`/`lon`
+
 ### Conventions to follow
 
 - **Lexicons**: use `(dataset_key_str, modifier_callable)` tuples in VOCAB. Use named functions (not lambdas) for modifiers when building VOCAB in loops. See `ECMWFOpenDataIFSLexicon.build_vocab()` pattern with `nmod`/`zmod`.

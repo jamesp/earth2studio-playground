@@ -282,23 +282,28 @@ def combine_inputs(
     Concatenates along the variable dimension and builds a coordinate
     system matching :data:`INPUT_VARIABLES`.
 
+    Both inputs are expected to come from ``fetch_data`` with ``interp_to``,
+    so their shape is ``(time, lead_time, variable, lat, lon)``.
+    Concatenation is along the ``variable`` dimension (dim 2).
+
     Parameters
     ----------
     metoffice_data : torch.Tensor
-        Met Office fields, shape ``(batch, 70, lat, lon)``.
+        Met Office fields, shape ``(time, lead_time, 70, lat, lon)``.
     metoffice_coords : CoordSystem
         Coordinates from the Met Office fetch.
     sst_data : torch.Tensor
-        SST field from OISST, shape ``(batch, 1, lat, lon)``.
+        SST field from OISST, shape ``(time, lead_time, 1, lat, lon)``.
     sst_coords : CoordSystem
         Coordinates from the OISST fetch.
 
     Returns
     -------
     tuple[torch.Tensor, CoordSystem]
-        Combined tensor ``(batch, 71, lat, lon)`` and coordinate system.
+        Combined tensor ``(time, lead_time, 71, lat, lon)`` and coordinate system.
     """
-    combined = torch.cat([metoffice_data, sst_data], dim=1)
+    var_dim = list(metoffice_coords.keys()).index("variable")
+    combined = torch.cat([metoffice_data, sst_data], dim=var_dim)
     coords = metoffice_coords.copy()
     coords["variable"] = np.array(INPUT_VARIABLES)
     return combined, coords
@@ -318,6 +323,7 @@ def fetch_oisst(
         Times to fetch (same as passed to the Met Office data source).
     atlas_input_coords : CoordSystem
         Atlas model input coords (used for regridding via ``interp_to``).
+        Must contain ``"lat"`` and ``"lon"`` keys.
     device : torch.device or str
         Target device for the output tensor.
 
@@ -325,15 +331,19 @@ def fetch_oisst(
     -------
     tuple[torch.Tensor, CoordSystem]
         SST field ``(batch, 1, lat, lon)`` in Kelvin, and its coordinates.
+        Spatial keys are ``"lat"`` / ``"lon"``.
     """
     from earth2studio.data import PlanetaryComputerOISST
     from earth2studio.data.utils import fetch_data
 
+    from coords import interp_coords_to_latlon, make_interp_to
+
     oisst = PlanetaryComputerOISST()
-    return fetch_data(
+    data, coords = fetch_data(
         source=oisst,
         time=time,
         variable=np.array(["sst"]),
         device=device,
-        interp_to=atlas_input_coords,
+        interp_to=make_interp_to(atlas_input_coords),
     )
+    return data, interp_coords_to_latlon(coords)
