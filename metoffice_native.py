@@ -7,7 +7,7 @@ Microsoft Planetary Computer.
 This module provides :class:`PlanetaryComputerMetOfficeNative`, a DataSource
 that returns raw Met Office fields on the **native** ~0.09° grid using
 native Met Office variable names.  No derived variables, no regridding,
-no coordinate convention changes.
+longitude normalized to [0, 360].
 
 Variable names follow the pattern:
 
@@ -21,7 +21,7 @@ Variable names follow the pattern:
 
 The output xarray DataArray has:
 - lat: ascending (S→N), native resolution (~0.09°)
-- lon: native [-180, 180]
+- lon: [0, 360] (converted from native [-180, 180])
 - No derived variables — just what's in the NetCDF files
 
 Usage::
@@ -160,14 +160,22 @@ class MetOfficeNativeLexicon(metaclass=LexiconType):
         return cls.VOCAB[val]
 
 
-# Native ~0.09° grid: 1920 lats (S→N), 2560 lons, both in [-180, 180] convention
+# Native ~0.09° grid: 1920 lats (S→N), 2560 lons
 NATIVE_NLAT: int = 1920
 NATIVE_NLON: int = 2560
 
 NATIVE_LAT_COORDS = np.linspace(-89.953125, 89.953125, NATIVE_NLAT, dtype=np.float32)
-NATIVE_LON_COORDS = np.linspace(
+
+# Raw NetCDF files use [-180, 180] but Atlas (and most models) need [0, 360].
+# We roll the data in _read_field and declare coords in [0, 360] so regridding
+# finds valid data across the full domain.
+_RAW_LON_COORDS = np.linspace(
     -179.9296875, 179.9296875, NATIVE_NLON, dtype=np.float32
 )
+NATIVE_LON_COORDS = _RAW_LON_COORDS % 360
+NATIVE_LON_COORDS.sort()
+# Number of grid points to roll: shift the 0° meridian to index 0
+_LON_ROLL = int(np.searchsorted(_RAW_LON_COORDS, 0.0))
 
 
 class PlanetaryComputerMetOfficeNative(_PlanetaryComputerData):
@@ -176,7 +184,7 @@ class PlanetaryComputerMetOfficeNative(_PlanetaryComputerData):
 
     Returns fields on the **native** Met Office grid (~0.09° resolution)
     with native variable names.  No derived variables, no regridding,
-    no coordinate convention changes.
+    longitude normalized to [0, 360].
 
     Parameters
     ----------
@@ -396,7 +404,9 @@ class PlanetaryComputerMetOfficeNative(_PlanetaryComputerData):
             target_pa = _HPA_TO_PA[pressure_hpa]
             field = field.sel(pressure=target_pa, method="nearest")
 
-        return field.values.squeeze().astype(np.float32)
+        arr = field.values.squeeze().astype(np.float32)
+        # Roll lon from [-180,180] → [0,360] to match NATIVE_LON_COORDS
+        return np.roll(arr, -_LON_ROLL, axis=-1)
 
     async def _fetch_data(
         self,
