@@ -38,7 +38,7 @@ from earth2studio.utils.type import CoordSystem
 #: Standard gravity (m s⁻²).
 G = 9.80665
 
-#: Ratio of molecular weight of water vapour to dry air.
+#: Ratio of molecular weight of water vapor to dry air.
 EPSILON = 0.622
 
 #: Pressure levels served by the Atlas model (hPa).
@@ -49,46 +49,33 @@ ATLAS_PRESSURE_LEVELS_HPA: list[int] = [
 
 def _build_input_variables() -> list[str]:
     """Native Met Office variables needed by this diagnostic."""
-    variables: list[str] = []
-
-    variables.append("wind_speed_at_10m")
-    variables.append("wind_from_direction_at_10m")
-    variables.append("air_temperature_at_screen_level")
-    variables.append("air_pressure_at_sea_level")
-    variables.append("surface_temperature")
-    variables.append("lwe_precipitation_rate")
-
+    variables: list[str] = [
+        "wind_speed_at_10m",
+        "wind_from_direction_at_10m",
+        "air_temperature_at_screen_level",
+        "air_pressure_at_sea_level",
+        "surface_temperature",
+        "lwe_precipitation_rate",
+    ]
     for hpa in ATLAS_PRESSURE_LEVELS_HPA:
-        variables.append(f"wind_speed_{hpa}hPa")
-        variables.append(f"wind_from_direction_{hpa}hPa")
-        variables.append(f"air_temperature_{hpa}hPa")
-        variables.append(f"relative_humidity_{hpa}hPa")
-        variables.append(f"geopotential_height_{hpa}hPa")
-
+        variables.extend([
+            f"wind_speed_{hpa}hPa",
+            f"wind_from_direction_{hpa}hPa",
+            f"air_temperature_{hpa}hPa",
+            f"relative_humidity_{hpa}hPa",
+            f"geopotential_height_{hpa}hPa",
+        ])
     return variables
 
 
 def _build_output_variables() -> list[str]:
     """Atlas variable names produced by this diagnostic."""
-    # Must match the Atlas VARIABLES list exactly.
-    variables: list[str] = []
-
-    variables.extend(["u10m", "v10m", "u100m", "v100m"])
+    # Order must match the Atlas VARIABLES list exactly.
+    variables: list[str] = ["u10m", "v10m", "u100m", "v100m"]
     variables.extend(["t2m", "sp", "msl", "tcwv"])
-
-    for hpa in ATLAS_PRESSURE_LEVELS_HPA:
-        variables.append(f"u{hpa}")
-    for hpa in ATLAS_PRESSURE_LEVELS_HPA:
-        variables.append(f"v{hpa}")
-    for hpa in ATLAS_PRESSURE_LEVELS_HPA:
-        variables.append(f"z{hpa}")
-    for hpa in ATLAS_PRESSURE_LEVELS_HPA:
-        variables.append(f"t{hpa}")
-    for hpa in ATLAS_PRESSURE_LEVELS_HPA:
-        variables.append(f"q{hpa}")
-
+    for prefix in ("u", "v", "z", "t", "q"):
+        variables.extend(f"{prefix}{hpa}" for hpa in ATLAS_PRESSURE_LEVELS_HPA)
     variables.extend(["sst", "tp"])
-
     return variables
 
 
@@ -105,7 +92,7 @@ class MetOfficeToAtlasDiagnostic(torch.nn.Module):
       ``v = -speed × cos(dir)`` for 10 m and all pressure levels.
       Meteorological convention: direction is "from", clockwise from north.
     - **Specific humidity**: from relative humidity + temperature + pressure
-      via Bolton (1980) saturation vapour pressure.
+      via Bolton (1980) saturation vapor pressure.
     - **Geopotential**: ``z = height × 9.80665``.
     - **100 m wind**: falls back to 10 m (not available from Met Office).
     - **Surface pressure**: approximated by MSLP.
@@ -134,7 +121,7 @@ class MetOfficeToAtlasDiagnostic(torch.nn.Module):
         self.register_buffer("_pressure_pa", p_pa)
 
     def input_coords(self) -> CoordSystem:
-        """Input coordinate system: native Met Office variables."""
+        """Coordinate system expected by this diagnostic."""
         return OrderedDict(
             {
                 "batch": np.empty(0),
@@ -146,7 +133,7 @@ class MetOfficeToAtlasDiagnostic(torch.nn.Module):
 
     @batch_coords()
     def output_coords(self, input_coords: CoordSystem) -> CoordSystem:
-        """Output coordinate system: Atlas variables."""
+        """Coordinate system produced by this diagnostic."""
         target_input_coords = self.input_coords()
         handshake_dim(input_coords, "variable", 1)
         handshake_dim(input_coords, "lat", 2)
@@ -158,7 +145,6 @@ class MetOfficeToAtlasDiagnostic(torch.nn.Module):
         return output_coords
 
     def _in(self, x: torch.Tensor, name: str) -> torch.Tensor:
-        """Select a single variable from the input tensor's variable dim."""
         return x[:, self._in_idx[name]]
 
     @staticmethod
@@ -177,7 +163,7 @@ class MetOfficeToAtlasDiagnostic(torch.nn.Module):
 
     @staticmethod
     def _saturation_vapor_pressure(t_k: torch.Tensor) -> torch.Tensor:
-        """Saturation vapour pressure (Pa) from temperature (K) via Bolton (1980)."""
+        """Saturation vapor pressure (Pa) from temperature (K) via Bolton (1980)."""
         t_c = t_k - 273.15
         return 611.2 * torch.exp(17.67 * t_c / (t_c + 243.5))
 

@@ -17,15 +17,16 @@ Usage:
     uv run python example_atlas_metoffice.py
 """
 
-import numpy as np
-import torch
 from datetime import datetime
 
-from earth2studio.models.px.atlas import Atlas, VARIABLES as ATLAS_VARIABLES
-from earth2studio.data.utils import fetch_data
+import numpy as np
+import torch
 
-from metoffice_native import PlanetaryComputerMetOfficeNative
+from earth2studio.data.utils import fetch_data
+from earth2studio.models.px.atlas import Atlas
+
 from metoffice_diagnostic import MetOfficeToAtlasDiagnostic
+from metoffice_native import PlanetaryComputerMetOfficeNative
 
 
 def main():

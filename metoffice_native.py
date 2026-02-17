@@ -43,14 +43,13 @@ from typing import Any
 
 import numpy as np
 import xarray as xr
-from loguru import logger
 
 from earth2studio.data.planetary_computer import (
     AssetPlan,
     VariableSpec,
     _PlanetaryComputerData,
 )
-from earth2studio.data.utils import datasource_cache_root
+from earth2studio.data.utils import datasource_cache_root, prep_data_inputs
 from earth2studio.lexicon.base import LexiconType
 
 try:
@@ -69,7 +68,6 @@ _HPA_TO_PA: dict[int, float] = {
     hpa: float(hpa * 100) for hpa in PRESSURE_LEVELS_HPA
 }
 
-# STAC asset keys → CF variable names
 _PRESSURE_ASSETS: dict[str, str] = {
     "geopotential_height_on_pressure_levels": "geopotential_height",
     "temperature_on_pressure_levels": "air_temperature",
@@ -87,42 +85,39 @@ _SURFACE_ASSETS: dict[str, str] = {
     "precipitation_rate": "lwe_precipitation_rate",
 }
 
+#: Callable that post-processes a raw field (identity for native variables).
 Modifier = Callable[[Any], Any]
 
 
 def _nmod(x: Any) -> Any:
-    """Identity modifier — return the input unchanged."""
     return x
 
 
-def _surface_variable_name(asset_key: str, cf_var: str) -> str:
-    """Canonical variable name for a surface field.
+# CF names alone are ambiguous (e.g. "air_temperature" appears at both
+# screen level and on pressure levels), so surface variables use descriptive
+# names derived from the STAC asset keys.
+_ASSET_KEY_TO_NATIVE_NAME: dict[str, str] = {
+    "temperature_at_screen_level": "air_temperature_at_screen_level",
+    "pressure_at_mean_sea_level": "air_pressure_at_sea_level",
+    "wind_speed_at_10m": "wind_speed_at_10m",
+    "wind_direction_at_10m": "wind_from_direction_at_10m",
+    "temperature_at_surface": "surface_temperature",
+    "precipitation_rate": "lwe_precipitation_rate",
+}
 
-    We use a combination that gives a unique, readable name:
-    the CF variable name with the asset-key qualifier where needed.
-    """
-    # CF names alone are ambiguous (e.g. "air_temperature" appears at both
-    # screen level and on pressure levels), so we use descriptive names
-    # derived from the asset keys.
-    _ASSET_KEY_TO_NATIVE_NAME: dict[str, str] = {
-        "temperature_at_screen_level": "air_temperature_at_screen_level",
-        "pressure_at_mean_sea_level": "air_pressure_at_sea_level",
-        "wind_speed_at_10m": "wind_speed_at_10m",
-        "wind_direction_at_10m": "wind_from_direction_at_10m",
-        "temperature_at_surface": "surface_temperature",
-        "precipitation_rate": "lwe_precipitation_rate",
-    }
+
+def _surface_variable_name(asset_key: str, cf_var: str) -> str:
+    """Canonical variable name for a surface field."""
     return _ASSET_KEY_TO_NATIVE_NAME.get(asset_key, f"{cf_var}__{asset_key}")
 
 
 def _pressure_variable_name(cf_var: str, hpa: int) -> str:
-    """Canonical variable name for a pressure-level field."""
     return f"{cf_var}_{hpa}hPa"
 
 
 def _all_native_variables() -> list[str]:
-    """Return a sorted list of all native Met Office variable names."""
-    names = []
+    """All native Met Office variable names (surface first, then pressure-level)."""
+    names: list[str] = []
     for asset_key, cf_var in _SURFACE_ASSETS.items():
         names.append(_surface_variable_name(asset_key, cf_var))
     for _asset_key, cf_var in _PRESSURE_ASSETS.items():
@@ -251,19 +246,13 @@ class PlanetaryComputerMetOfficeNative(_PlanetaryComputerData):
         variable: str | list[str],
     ) -> xr.DataArray:
         """Validate times then delegate to the base-class fetch pipeline."""
-        from earth2studio.data.utils import prep_data_inputs
-
         times, _ = prep_data_inputs(time, variable)
         self._validate_time(times)
         return await super().fetch(time, variable)
 
     @staticmethod
     def _validate_time(times: list[datetime]) -> None:
-        """Verify requested times are valid Met Office reference times.
-
-        Met Office global deterministic forecasts are issued every 6 hours
-        (00, 06, 12, 18 UTC).
-        """
+        """Verify requested times fall on 6-hourly Met Office run boundaries."""
         for t in times:
             if (
                 t.hour not in PlanetaryComputerMetOfficeNative._VALID_RUN_HOURS
@@ -359,10 +348,7 @@ class PlanetaryComputerMetOfficeNative(_PlanetaryComputerData):
 
     @staticmethod
     def _spec_to_asset_key(spec: VariableSpec) -> tuple[str, str]:
-        """Determine the (collection_id, asset_key) for a variable.
-
-        Each native variable maps to exactly one asset (no derived variables).
-        """
+        """Map a variable spec to its (collection_id, asset_key)."""
         parts = spec.dataset_key.split("::")
         collection_type = parts[0]
         asset_key = parts[1]
@@ -382,10 +368,7 @@ class PlanetaryComputerMetOfficeNative(_PlanetaryComputerData):
         spec: VariableSpec,
         _target_time: datetime,
     ) -> np.ndarray:
-        """Extract a single variable from cached NetCDF assets.
-
-        Returns the raw field on the native Met Office grid.
-        """
+        """Extract a single variable as a raw native-grid field."""
         parts = spec.dataset_key.split("::")
         cf_var = parts[2]
         pressure_hpa = int(parts[3]) if len(parts) > 3 else None
