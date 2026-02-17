@@ -23,9 +23,11 @@ Usage:
 
 from collections import OrderedDict
 from datetime import datetime
+from pathlib import Path
 
 import numpy as np
 import torch
+import xarray as xr
 
 from earth2studio.data.utils import fetch_data
 from earth2studio.models.px.atlas import Atlas
@@ -37,6 +39,72 @@ from metoffice_diagnostic import (
     fetch_oisst,
 )
 from metoffice_native import PlanetaryComputerMetOfficeNative
+
+
+def results_to_dataset(
+    results: list[tuple[torch.Tensor, OrderedDict]],
+) -> xr.Dataset:
+    """Convert Atlas forecast results to an xarray Dataset.
+
+    Each result is ``(pred, pred_coords)`` where pred has shape
+    ``(batch, time, lead_time=1, variable, lat, lon)`` and coords
+    contain the corresponding arrays.
+
+    The output Dataset has one DataArray per variable, with dimensions
+    ``(time, lead_time, lat, lon)``.  The ``lead_time`` coordinate
+    stores timedeltas relative to the initialization time.
+
+    Parameters
+    ----------
+    results : list[tuple[torch.Tensor, CoordSystem]]
+        Output from Atlas ``create_iterator``, collected into a list.
+
+    Returns
+    -------
+    xr.Dataset
+        Dataset with forecast fields keyed by Atlas variable name.
+    """
+    # Stack all steps along lead_time
+    lead_times = []
+    data_per_step = []
+    for pred, coords in results:
+        # pred: (batch, time, lead_time=1, variable, lat, lon)
+        # Squeeze batch and time (single init), keep lead_time=1
+        data_per_step.append(pred[0, 0, 0].numpy())  # (variable, lat, lon)
+        lead_times.append(coords["lead_time"][0])
+
+    # Use coords from the first result for spatial/variable metadata
+    ref_coords = results[0][1]
+    variables = list(ref_coords["variable"])
+    lat = ref_coords["lat"]
+    lon = ref_coords["lon"]
+    time_val = ref_coords["time"]
+
+    stacked = np.stack(data_per_step, axis=0)  # (lead_time, variable, lat, lon)
+    lead_time_arr = np.array(lead_times)
+
+    data_vars = {}
+    for i, var_name in enumerate(variables):
+        data_vars[var_name] = xr.DataArray(
+            stacked[:, i, :, :],
+            dims=["lead_time", "lat", "lon"],
+            attrs={"long_name": var_name},
+        )
+
+    ds = xr.Dataset(
+        data_vars,
+        coords={
+            "time": time_val,
+            "lead_time": lead_time_arr,
+            "lat": lat,
+            "lon": lon,
+        },
+        attrs={
+            "source": "NVIDIA Atlas initialised from Met Office Global 10km Deterministic",
+            "history": f"Created by example_atlas_metoffice.py",
+        },
+    )
+    return ds
 
 
 def fetch_metoffice_regridded(
@@ -182,7 +250,7 @@ def main():
         if step >= forecast_steps:
             break
 
-    print("\n=== Forecast complete ===")
+    print("\n=== Forecast summary ===")
     for pred, coords in results:
         lead_h = int(coords["lead_time"][0] / np.timedelta64(1, "h"))
         var_list = list(coords["variable"])
@@ -192,6 +260,17 @@ def main():
             f"  T+{lead_h:3d}h: t2m global mean={t2m.mean():.1f}K "
             f"(min={t2m.min():.1f}, max={t2m.max():.1f})"
         )
+
+    # ---- Save forecast to zarr ----
+    output_path = Path(
+        f"forecast_metoffice_atlas_{init_time:%Y%m%d_%H%M}.zarr"
+    )
+    print(f"\n=== Saving forecast to {output_path} ===")
+    ds = results_to_dataset(results)
+    ds.to_zarr(output_path, mode="w")
+    print(f"  Wrote {output_path} ({sum(v.nbytes for v in ds.data_vars.values()) / 1e6:.1f} MB)")
+    print(f"  Variables: {list(ds.data_vars)}")
+    print(f"  Dimensions: {dict(ds.sizes)}")
 
 
 if __name__ == "__main__":
