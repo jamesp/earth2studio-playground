@@ -60,25 +60,16 @@ except ImportError:
     planetary_computer = None
     Client = None
 
-# ---------------------------------------------------------------------------
-# Physical constants and grid parameters
-# ---------------------------------------------------------------------------
-
-#: Pressure levels served by the Met Office global model (hPa).
 PRESSURE_LEVELS_HPA: list[int] = [
     50, 100, 150, 200, 250, 300, 400, 500, 600, 700, 850, 925, 1000,
 ]
 
-#: Mapping from hPa to Met Office Pa coordinate values.
+# Met Office NetCDF files use Pa for the pressure coordinate
 _HPA_TO_PA: dict[int, float] = {
     hpa: float(hpa * 100) for hpa in PRESSURE_LEVELS_HPA
 }
 
-# ---------------------------------------------------------------------------
-# Met Office asset layout
-# ---------------------------------------------------------------------------
-
-# Pressure-level asset keys → CF variable names
+# STAC asset keys → CF variable names
 _PRESSURE_ASSETS: dict[str, str] = {
     "geopotential_height_on_pressure_levels": "geopotential_height",
     "temperature_on_pressure_levels": "air_temperature",
@@ -87,7 +78,6 @@ _PRESSURE_ASSETS: dict[str, str] = {
     "relative_humidity_on_pressure_levels": "relative_humidity",
 }
 
-# Surface asset keys → CF variable names
 _SURFACE_ASSETS: dict[str, str] = {
     "temperature_at_screen_level": "air_temperature",
     "pressure_at_mean_sea_level": "air_pressure_at_sea_level",
@@ -96,22 +86,6 @@ _SURFACE_ASSETS: dict[str, str] = {
     "temperature_at_surface": "surface_temperature",
     "precipitation_rate": "lwe_precipitation_rate",
 }
-
-# ---------------------------------------------------------------------------
-# Native variable naming
-#
-# Each variable is named after the CF variable in the NetCDF file, with
-# pressure-level fields appended with ``_<hPa>hPa``.
-#
-# Surface variables use the full CF name from the asset:
-#   air_temperature_at_screen_level, air_pressure_at_sea_level,
-#   wind_speed_at_10m, wind_from_direction_at_10m, surface_temperature,
-#   lwe_precipitation_rate
-#
-# Pressure-level variables:
-#   air_temperature_500hPa, wind_speed_500hPa, wind_from_direction_500hPa,
-#   relative_humidity_500hPa, geopotential_height_500hPa, etc.
-# ---------------------------------------------------------------------------
 
 Modifier = Callable[[Any], Any]
 
@@ -127,21 +101,9 @@ def _surface_variable_name(asset_key: str, cf_var: str) -> str:
     We use a combination that gives a unique, readable name:
     the CF variable name with the asset-key qualifier where needed.
     """
-    # Surface fields where the CF name alone is ambiguous (e.g. both
-    # screen-level and surface temperature are 'air_temperature' vs
-    # 'surface_temperature').  We use the asset_key-derived suffix.
-    #
-    # For surface fields we simply use:
-    #   <cf_variable>_at_<qualifier>  from the asset_key
-    # But actually the asset keys already encode the qualifier nicely.
-    # The simplest unambiguous name is just the asset_key's implied name.
-    # Let's use: the CF variable name if unique, otherwise asset_key-based.
-    #
-    # Actually, the cleanest approach: use the *asset_key* as the variable
-    # name since it's already descriptive and unique.
-    #   temperature_at_screen_level → air_temperature  (ambiguous with pressure level)
-    # So we'll use the full asset_key as the variable name for surface fields.
-    # This matches what a user would look for in Met Office documentation.
+    # CF names alone are ambiguous (e.g. "air_temperature" appears at both
+    # screen level and on pressure levels), so we use descriptive names
+    # derived from the asset keys.
     _ASSET_KEY_TO_NATIVE_NAME: dict[str, str] = {
         "temperature_at_screen_level": "air_temperature_at_screen_level",
         "pressure_at_mean_sea_level": "air_pressure_at_sea_level",
@@ -158,10 +120,6 @@ def _pressure_variable_name(cf_var: str, hpa: int) -> str:
     return f"{cf_var}_{hpa}hPa"
 
 
-# ---------------------------------------------------------------------------
-# Build the set of all native variable names
-# ---------------------------------------------------------------------------
-
 def _all_native_variables() -> list[str]:
     """Return a sorted list of all native Met Office variable names."""
     names = []
@@ -176,24 +134,18 @@ def _all_native_variables() -> list[str]:
 ALL_NATIVE_VARIABLES: list[str] = _all_native_variables()
 
 
-# ---------------------------------------------------------------------------
-# Lexicon
-#
-# Maps each native variable name to a dataset_key with the format:
-#   <collection_type>::<asset_key>::<cf_variable>[::pressure_hPa]
-# ---------------------------------------------------------------------------
-
 def _build_native_vocab() -> dict[str, tuple[str, Modifier]]:
-    """Build the vocabulary for native Met Office variable names."""
+    """Build the vocabulary for native Met Office variable names.
+
+    Dataset keys use the format ``<collection_type>::<asset_key>::<cf_variable>[::pressure_hPa]``.
+    """
     vocab: dict[str, tuple[str, Modifier]] = {}
 
-    # Surface fields
     for asset_key, cf_var in _SURFACE_ASSETS.items():
         var_name = _surface_variable_name(asset_key, cf_var)
         dataset_key = f"surface::{asset_key}::{cf_var}"
         vocab[var_name] = (dataset_key, _nmod)
 
-    # Pressure-level fields
     for asset_key, cf_var in _PRESSURE_ASSETS.items():
         for hpa in PRESSURE_LEVELS_HPA:
             var_name = _pressure_variable_name(cf_var, hpa)
@@ -213,30 +165,14 @@ class MetOfficeNativeLexicon(metaclass=LexiconType):
         return cls.VOCAB[val]
 
 
-# ---------------------------------------------------------------------------
-# Native grid coordinates
-#
-# The Met Office global deterministic model uses a ~0.09° lat-lon grid:
-#   - 1920 latitudes: S→N, approximately [-89.95, 89.95]
-#   - 2560 longitudes: [-179.93, 179.93]
-#
-# These are the coordinates returned in the DataArray output.
-# ---------------------------------------------------------------------------
-
-#: Number of latitude points on the native grid.
+# Native ~0.09° grid: 1920 lats (S→N), 2560 lons, both in [-180, 180] convention
 NATIVE_NLAT: int = 1920
-#: Number of longitude points on the native grid.
 NATIVE_NLON: int = 2560
 
 NATIVE_LAT_COORDS = np.linspace(-89.953125, 89.953125, NATIVE_NLAT, dtype=np.float32)
 NATIVE_LON_COORDS = np.linspace(
     -179.9296875, 179.9296875, NATIVE_NLON, dtype=np.float32
 )
-
-
-# ---------------------------------------------------------------------------
-# Data source
-# ---------------------------------------------------------------------------
 
 
 class PlanetaryComputerMetOfficeNative(_PlanetaryComputerData):
@@ -270,15 +206,12 @@ class PlanetaryComputerMetOfficeNative(_PlanetaryComputerData):
     >>> da = ds(datetime(2026, 2, 17), ["air_temperature_500hPa", "wind_speed_at_10m"])
     """
 
-    # -- STAC collections --
     PRESSURE_COLLECTION = "met-office-global-deterministic-pressure"
     SURFACE_COLLECTION = "met-office-global-deterministic-near-surface"
 
-    # -- Native grid --
     LAT_COORDS = NATIVE_LAT_COORDS
     LON_COORDS = NATIVE_LON_COORDS
 
-    # Met Office runs are produced every 6 hours.
     _VALID_RUN_HOURS = {0, 6, 12, 18}
 
     def __init__(
@@ -306,15 +239,12 @@ class PlanetaryComputerMetOfficeNative(_PlanetaryComputerData):
             max_retries=max_retries,
         )
         self._forecast_hour = forecast_hour
-        # Dataset cache for the current timestamp
         self._ds_cache: dict[str, xr.Dataset] = {}
-        # Current STAC items for both collections
         self._current_items: dict[str, Any] = {}
 
     # ------------------------------------------------------------------
     # Time validation & fetch override
     # ------------------------------------------------------------------
-
     async def fetch(
         self,
         time: datetime | list[datetime],
@@ -346,9 +276,8 @@ class PlanetaryComputerMetOfficeNative(_PlanetaryComputerData):
                 )
 
     # ------------------------------------------------------------------
-    # STAC search (two collections)
+    # STAC search
     # ------------------------------------------------------------------
-
     def _locate_item(self, when: datetime) -> dict[str, Any]:
         """Locate STAC items for *both* collections at the given reference time."""
         if self._client is None:
@@ -394,7 +323,6 @@ class PlanetaryComputerMetOfficeNative(_PlanetaryComputerData):
     # ------------------------------------------------------------------
     # Asset planning
     # ------------------------------------------------------------------
-
     def _prepare_asset_plans(
         self,
         items: Any,  # dict[str, pystac.Item]
@@ -436,7 +364,7 @@ class PlanetaryComputerMetOfficeNative(_PlanetaryComputerData):
         Each native variable maps to exactly one asset (no derived variables).
         """
         parts = spec.dataset_key.split("::")
-        collection_type = parts[0]  # "pressure" or "surface"
+        collection_type = parts[0]
         asset_key = parts[1]
         col = (
             PlanetaryComputerMetOfficeNative.PRESSURE_COLLECTION
@@ -448,7 +376,6 @@ class PlanetaryComputerMetOfficeNative(_PlanetaryComputerData):
     # ------------------------------------------------------------------
     # Variable extraction
     # ------------------------------------------------------------------
-
     def extract_variable_numpy(
         self,
         plan: AssetPlan,
@@ -465,10 +392,6 @@ class PlanetaryComputerMetOfficeNative(_PlanetaryComputerData):
 
         raw = self._read_field(plan.local_path, cf_var, pressure_hpa)
         return spec.modifier(raw)
-
-    # ------------------------------------------------------------------
-    # NetCDF I/O with instance-level caching
-    # ------------------------------------------------------------------
 
     def _read_field(
         self,
@@ -492,10 +415,6 @@ class PlanetaryComputerMetOfficeNative(_PlanetaryComputerData):
 
         return field.values.squeeze().astype(np.float32)
 
-    # ------------------------------------------------------------------
-    # Override _fetch_data to manage the dataset cache lifecycle
-    # ------------------------------------------------------------------
-
     async def _fetch_data(
         self,
         client: Any,
@@ -509,11 +428,9 @@ class PlanetaryComputerMetOfficeNative(_PlanetaryComputerData):
         """Download and extract all variables for one timestamp."""
         import asyncio as _asyncio
 
-        # Locate items for both collections.
         items = await _asyncio.to_thread(self._locate_item, requested_time)
         self._current_items = items
 
-        # Build and execute asset plans.
         asset_plans = self._prepare_asset_plans(items, variables)
         download_tasks = [
             self._downloaded_asset(client, semaphore, plan)
@@ -523,7 +440,6 @@ class PlanetaryComputerMetOfficeNative(_PlanetaryComputerData):
         if download_tasks:
             await _asyncio.gather(*download_tasks)
 
-        # Extract all variables with dataset caching.
         self._ds_cache.clear()
         try:
             data_stack = np.zeros(
@@ -542,10 +458,6 @@ class PlanetaryComputerMetOfficeNative(_PlanetaryComputerData):
             self._current_items = {}
 
         progress.update(len(variables))
-
-    # ------------------------------------------------------------------
-    # Cache path
-    # ------------------------------------------------------------------
 
     @property
     def cache(self) -> str:

@@ -40,6 +40,16 @@ Key dataclasses: `AssetPlan` (download plan), `VariableSpec` (resolved variable 
 - **Time validation**: implement `_validate_time(times)`. On main branch, base class calls it from `fetch()`. On 0.12.1rc0, override `fetch()` to call it yourself.
 - **Dataset key format**: varies by data source. ECMWF IFS uses `shortName::pressure::soilLayer`. Met Office uses `collection_type::asset_key::cf_variable[::pressure_hPa]`.
 
+### Commenting style
+
+Follow the earth2studio commenting conventions:
+
+- **Comments explain WHY, not WHAT.** Don't restate what the code does — the code is the "what". Comments should explain non-obvious reasoning: API quirks, coordinate conventions, mathematical choices, approximations, known limitations.
+- **No decorative comment boxes.** Don't use multi-line `# ====` / `# ----` bordered section headers. One-line section dividers inside long classes are acceptable (e.g. `# ---- Helper methods ----`) following the earth2studio pattern.
+- **Self-documenting names over comments.** If a variable or function name makes the intent clear, don't add a comment that says the same thing in different words.
+- **Docstrings for public API.** Classes, public methods, and module-level functions should have docstrings. Docstrings are documentation, not comments — they describe *interface*, not implementation.
+- **`#:` for public constants.** Sphinx-style `#:` doc-comments on module-level constants (e.g. physical constants) are fine — these are documentation, not inline comments.
+
 ## Met Office Data Pipeline (Decomposed)
 
 The Met Office data pipeline is split into two components:
