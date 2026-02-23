@@ -8,3 +8,9 @@ wheels/
 
 # Virtual environments
 .venv
+*.zarr
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+.ipynb_aml_checkpoints/
+*.amltmp

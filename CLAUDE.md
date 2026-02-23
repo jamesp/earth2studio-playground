@@ -8,6 +8,8 @@
 - **Installed version**: 0.12.1rc0 (check with `uv pip show earth2studio`)
 - **Main branch** has newer features not in 0.12.1rc0 (e.g. `data_dtype` param, `_validate_time` in base class)
 
+A local cache of useful docs about Earth2Studio are kept in @./docs/earth2studio.md. You can update this file with information as you wish.
+
 ### Key source files (installed)
 
 - Base class: `.venv/lib/python3.12/site-packages/earth2studio/data/planetary_computer.py`

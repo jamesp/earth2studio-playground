@@ -355,7 +355,7 @@ class MetOfficePlanetaryComputer(_PlanetaryComputerData):
         cache_key = str(local_path)
         if cache_key not in self._ds_cache:
             self._ds_cache[cache_key] = xr.open_dataset(
-                local_path, engine="h5netcdf"
+                local_path, engine="h5netcdf", decode_timedelta=True,
             )
 
         ds = self._ds_cache[cache_key]
