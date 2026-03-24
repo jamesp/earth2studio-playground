@@ -1,5 +1,19 @@
 # Project Notes
 
+## Running Python
+
+This project uses a `uv`-managed virtual environment.
+
+- **Run a script**: `uv run python script.py`
+- **Run a one-liner / interactive**: `uv run python -c "import earth2studio; ..."`
+- **Start Jupyter**: `uv run jupyter notebook` or `uv run jupyter lab`
+- **Install a package**: `uv add <package>` (updates `pyproject.toml`)
+- **Check installed packages**: `uv pip show <package>`
+
+If the `.venv` doesn't exist yet, run `uv sync` to create it and install all dependencies.
+
+Do **not** activate the venv manually or use bare `python`/`pip` — always prefix with `uv run` or `uv pip`.
+
 ## Earth2Studio Framework
 
 - **Repo**: https://github.com/NVIDIA/earth2studio

@@ -20,3 +20,8 @@ dependencies = [
 [tool.uv.sources]
 earth2studio = { git = "https://github.com/NVIDIA/earth2studio.git", rev = "0.12.1" }
 natten = { url = "https://github.com/SHI-Labs/NATTEN/releases/download/v0.21.5/natten-0.21.5%2Btorch2100cu128-cp312-cp312-linux_x86_64.whl"}
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]

@@ -97,6 +97,22 @@ _ASSET_KEY_TO_NATIVE_NAME: dict[str, str] = {
 }
 
 
+def _pad_lon_periodic(da: xr.DataArray) -> xr.DataArray:
+    """Extend longitude dimension with one wrap-around point at each end.
+
+    The native Met Office grid spans [0.07°, 359.93°] — a half-cell gap from
+    both 0° and 360°.  Without this padding, xarray.interp treats the Atlas
+    lon=0 point as out-of-bounds and returns NaN.  Prepending a copy of the
+    last column at lon≈-0.07° and appending a copy of the first column at
+    lon≈360.07° lets linear interp smoothly wrap across the boundary.
+    """
+    lon = da.coords["lon"].values
+    step = float(lon[1] - lon[0])
+    pre = da.isel(lon=[-1]).assign_coords(lon=[lon[-1] - 360.0])
+    post = da.isel(lon=[0]).assign_coords(lon=[lon[0] + 360.0])
+    return xr.concat([pre, da, post], dim="lon")
+
+
 def _surface_variable_name(asset_key: str, cf_var: str) -> str:
     """Canonical variable name for a surface field."""
     return _ASSET_KEY_TO_NATIVE_NAME.get(asset_key, f"{cf_var}__{asset_key}")
@@ -222,7 +238,8 @@ class MetOfficePlanetaryComputer(_PlanetaryComputerData):
         """Validate times then delegate to the base-class fetch pipeline."""
         times, _ = prep_data_inputs(time, variable)
         self._validate_time(times)
-        return await super().fetch(time, variable)
+        da = await super().fetch(time, variable)
+        return _pad_lon_periodic(da)
 
     @staticmethod
     def _validate_time(times: list[datetime]) -> None:

@@ -94,7 +94,8 @@ class MetOfficeAtlasDiagnostic(torch.nn.Module):
     - **Geopotential**: ``z = height × 9.80665``.
     - **100 m wind**: falls back to 10 m (not available from Met Office).
     - **Surface pressure**: approximated by MSLP.
-    - **TCWV**: filled with zeros (not available from Met Office).
+    - **TCWV**: integrated from specific humidity over pressure levels
+      (trapezoidal rule, 50–1000 hPa).
     - **SST**: passed through from input.
     - **Precipitation**: passed through from ``lwe_precipitation_rate``.
 
@@ -182,6 +183,20 @@ class MetOfficeAtlasDiagnostic(torch.nn.Module):
         q = EPSILON * e / (p_pa - (1.0 - EPSILON) * e)
         return torch.clamp(q, min=0.0)
 
+    def _integrate_tcwv(
+        self, q_levels: list[torch.Tensor]
+    ) -> torch.Tensor:
+        """TCWV (kg m⁻²) by trapezoidal integration of q over pressure levels.
+
+        Pressure levels are ordered top-down (50 → 1000 hPa), so dp is positive.
+        """
+        p = self._pressure_pa  # (n_levels,)
+        tcwv = torch.zeros_like(q_levels[0])
+        for i in range(len(q_levels) - 1):
+            dp = p[i + 1] - p[i]
+            tcwv = tcwv + 0.5 * (q_levels[i] + q_levels[i + 1]) * dp
+        return tcwv / G
+
     @torch.inference_mode()
     @batch_func()
     def __call__(
@@ -232,7 +247,8 @@ class MetOfficeAtlasDiagnostic(torch.nn.Module):
         out[:, self._out_idx["sp"]] = msl
         out[:, self._out_idx["msl"]] = msl
 
-        # TCWV not available; left as zero from initialization
+        # q at each pressure level, collected for TCWV integration
+        q_levels: list[torch.Tensor] = []
 
         for level_i, hpa in enumerate(ATLAS_PRESSURE_LEVELS_HPA):
             p_pa = self._pressure_pa[level_i]
@@ -255,6 +271,11 @@ class MetOfficeAtlasDiagnostic(torch.nn.Module):
             t_k = self._in(x, f"air_temperature_{hpa}hPa")
             q = self._specific_humidity(rh, t_k, p_pa)
             out[:, self._out_idx[f"q{hpa}"]] = q
+            q_levels.append(q)
+
+        # TCWV via trapezoidal integration of q over pressure:
+        # TCWV = (1/g) ∫ q dp  from top (50 hPa) to surface (1000 hPa)
+        out[:, self._out_idx["tcwv"]] = self._integrate_tcwv(q_levels)
 
         out[:, self._out_idx["sst"]] = self._in(x, "sst")
         out[:, self._out_idx["tp"]] = self._in(x, "lwe_precipitation_rate")
